@@ -5,7 +5,7 @@ from enum import IntEnum
 # 消息类型定义
 class MessageType(IntEnum):
     CLIENT_HELLO = 0x80
-    SERVER_HELLO = 0x81         
+    SERVER_HELLO = 0x81 
     SERVER_CERTIFICATE = 0x82   # 130
     CLIENT_CERTIFICATE = 0x83
     CERTIFICATE_VERIFY = 0x84

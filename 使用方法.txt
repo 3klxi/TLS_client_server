@@ -1,0 +1,76 @@
+🔧 使用说明
+1. 生成 RSA 公私钥对
+
+服务端生成密钥：
+
+openssl genpkey -algorithm RSA -out server_private.pem -pkeyopt rsa_keygen_bits:1024
+openssl rsa -pubout -in server_private.pem -out server_public.pem
+
+客户端生成密钥：
+
+openssl genpkey -algorithm RSA -out client_private.pem -pkeyopt rsa_keygen_bits:1024
+openssl rsa -pubout -in client_private.pem -out client_public.pem
+
+2. 安装依赖
+
+使用 pip 安装项目所需依赖：
+
+pip install -r requirements.txt
+
+3. 配置可信公钥哈希
+
+打开 client.py 文件，配置服务端公钥的 SHA-256 哈希：
+
+trusted_pubkey_sha256 = "YOUR_SERVER_PUBKEY_HASH"
+
+获取公钥哈希示例命令：
+
+openssl rsa -pubin -in server_public.pem -outform DER | openssl dgst -sha256
+
+将输出的哈希值（去掉 (stdin)= ）粘贴到代码中。
+4. 启动服务器
+
+python server.py [host] [port]
+
+    默认 host 为 localhost
+    默认 port 为 8443
+
+5. 启动客户端
+
+python client.py [host] [port]
+
+    默认连接到 localhost:8443
+
+📡 抓包分析（可选）
+
+你可以使用 Wireshark 抓包分析 TLS 通信过程：
+
+    选择 Adapter for loopback traffic capture 适配器（本地通信）
+
+    设置过滤器为：
+
+    tcp.port == 8443
+
+    可以观察：
+        握手过程中的 ClientHello、ServerHello、证书传输等消息
+        加密数据传输阶段的 TCP 包
+        HMAC 校验字段
+
+    注意：由于是本地回环通信，必须使用 Npcap 支持的 Loopback 适配器才能抓包成功。
+
+📁 项目结构
+
+.
+├── client.py                 # 客户端主程序
+├── server.py                 # 服务端主程序
+├── crypto.py                 # 加解密与签名函数
+├── common.py                 # 通用消息封装与类型定义
+├── client_messages.py        # 客户端相关消息结构
+├── server_messages.py        # 服务端相关消息结构
+├── client_private.pem        # 客户端私钥（需自行生成）
+├── client_public.pem         # 客户端公钥（需自行生成）
+├── server_private.pem        # 服务端私钥（需自行生成）
+├── server_public.pem         # 服务端公钥（需自行生成）
+├── requirements.txt          # 依赖包列表
+├── .env                      #  环境变量
+└── 使用方法.txt               # 使用说明文档

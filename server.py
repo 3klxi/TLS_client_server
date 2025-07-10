@@ -1,34 +1,64 @@
 import socket
 import hashlib
 import sys
-from Crypto.PublicKey import RSA
+import argparse
+from dotenv import load_dotenv
 from common import Message, MessageType, ErrorType, ErrorMessage, ApplicationData
 from client_messages import ClientHello, ClientCertificate, CertificateVerify, ClientKeyExchange, ClientFinished
 from server_messages import ServerHello, ServerCertificate, ServerFinished
-from crypto import *
 
+# 加载环境变量
+load_dotenv()
 
 class TLSServer:
-    def __init__(self, host='localhost', port=8443):
-        self.host = host
-        self.port = port
+    def __init__(self, host=None, port=None, use_gm=False):
+        self.host = host or os.getenv('SERVER_HOST', 'localhost')
+        self.port = port or int(os.getenv('SERVER_PORT', '8443'))
         self.socket = None
         self.client_socket = None
         self.client_address = None
+        self.use_gm = use_gm
         
-        # # version1: 生成RSA密钥对
-        # self.rsa_key = generate_rsa_key()
-        # self.private_key = self.rsa_key.export_key()
-        # self.public_key = self.rsa_key.publickey().export_key()
+        # 根据使用的加密算法选择不同的导入模块
+        if self.use_gm:
+            print("[*] 服务器使用国密算法套件")
+            from crypto_gm import (
+                generate_rsa_key, rsa_encrypt, rsa_decrypt, rsa_sign, rsa_verify,
+                aes_encrypt, aes_decrypt, hmac, derive_key, gm_hash
+            )
+            self.crypto_module = {
+                'generate_rsa_key': generate_rsa_key,
+                'rsa_encrypt': rsa_encrypt,
+                'rsa_decrypt': rsa_decrypt,
+                'rsa_sign': rsa_sign,
+                'rsa_verify': rsa_verify,
+                'aes_encrypt': aes_encrypt,
+                'aes_decrypt': aes_decrypt,
+                'hmac': hmac,
+                'derive_key': derive_key,
+                'hash_func': gm_hash
+            }
+        else:
+            print("[*] 服务器使用传统加密算法套件")
+            from crypto import (
+                generate_rsa_key, rsa_encrypt, rsa_decrypt, rsa_sign, rsa_verify,
+                aes_encrypt, aes_decrypt, hmac, derive_key
+            )
+            self.crypto_module = {
+                'generate_rsa_key': generate_rsa_key,
+                'rsa_encrypt': rsa_encrypt,
+                'rsa_decrypt': rsa_decrypt,
+                'rsa_sign': rsa_sign,
+                'rsa_verify': rsa_verify,
+                'aes_encrypt': aes_encrypt,
+                'aes_decrypt': aes_decrypt,
+                'hmac': hmac,
+                'derive_key': derive_key,
+                'hash_func': hashlib.sha1 if not use_gm else gm_hash
+            }
 
-        #version2: 加载本地的RSA密钥对
-        with open("server_private.pem", "rb") as f:
-            self.private_key = f.read()
-        
-        with open("server_public.pem", "rb") as f:
-            self.public_key = f.read()
-
-        self.rsa_key = RSA.import_key(self.private_key)
+        # 加载密钥对
+        self._load_keys()
         
         # 握手状态
         self.handshake_complete = False
@@ -45,13 +75,49 @@ class TLSServer:
         self.master_secret = None
         self.session_key = None
     
+    def _load_keys(self):
+        """加载服务器密钥对"""
+        try:
+            with open("server_private.pem", "rb") as f:
+                self.private_key = f.read()
+            
+            with open("server_public.pem", "rb") as f:
+                self.public_key = f.read()
+
+            if not self.use_gm:
+                # 传统算法需要导入RSA模块
+                from Crypto.PublicKey import RSA
+                self.rsa_key = RSA.import_key(self.private_key)
+            else:
+                # 国密算法直接使用原始密钥数据
+                self.rsa_key = None
+                
+        except Exception as e:
+            print(f"[!] 加载密钥文件失败: {e}")
+            raise
+    
+    def _get_hash_digest(self, data):
+        """根据算法类型获取哈希摘要"""
+        if self.use_gm:
+            return self.crypto_module['hash_func'](data)
+        else:
+            return hashlib.sha1(data).digest()
+    
+    def _get_hash_hex(self, data):
+        """根据算法类型获取哈希摘要的十六进制表示"""
+        if self.use_gm:
+            return self.crypto_module['hash_func'](data).hex()
+        else:
+            return hashlib.sha1(data).hexdigest()
+    
     def start(self):
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((self.host, self.port))
             self.socket.listen(1)
-            print(f"[*] 服务器启动，监听 {self.host}:{self.port}")
+            crypto_type = "国密" if self.use_gm else "传统"
+            print(f"[*] 服务器启动，监听 {self.host}:{self.port} ({crypto_type}算法)")
             
             while True:
                 self.client_socket, self.client_address = self.socket.accept()
@@ -133,10 +199,6 @@ class TLSServer:
             self.client_certificate = ClientCertificate.from_message(msg)
             print("[*] 收到 ClientCertificate")
             print(f"    - 接受到的客户端的证书长度: {len(self.client_certificate.certificate)} 字节")
-            
-            print(f"{client_hello_raw}")
-            print(f"{server_hello_raw}")
-            print(f"{server_cert_raw}")
 
             # 5. 接收 CertificateVerify
             if remaining:
@@ -163,10 +225,11 @@ class TLSServer:
 
             # 用原始数据拼接签名数据进行验证
             verification_data = client_hello_raw + server_hello_raw + server_cert_raw
-            verify_hash = hashlib.sha1(verification_data).hexdigest()
-            print(f"    - 签名验证数据 SHA1: {verify_hash}")
+            verify_hash = self._get_hash_hex(verification_data)
+            hash_type = "SM3" if self.use_gm else "SHA1"
+            print(f"    - 签名验证数据 {hash_type}: {verify_hash}")
             
-            if not rsa_verify(
+            if not self.crypto_module['rsa_verify'](
                 self.client_certificate.certificate,
                 verification_data,
                 self.certificate_verify.signature
@@ -180,15 +243,14 @@ class TLSServer:
 
             # 6. 接收 ClientKeyExchange
             if remaining:
-                client_key_exchange_raw = remaining[:3 + msg.length]  # ✅ 正确保存
+                client_key_exchange_raw = remaining[:3 + remaining[2]]  # 正确保存
                 msg, _ = Message.unpack(remaining)
             else:
                 data = self.receive_message()
                 if not data:
                     return False
-                client_key_exchange_raw = data[:3 + msg.length]  # ✅ 正确保存
+                client_key_exchange_raw = data[:3 + data[2]]  # 正确保存
                 msg, _ = Message.unpack(data)
-
 
             if msg.msg_type != MessageType.CLIENT_KEY_EXCHANGE:
                 print(f"[!] 预期 ClientKeyExchange，但收到 {msg.msg_type}")
@@ -200,7 +262,7 @@ class TLSServer:
             print(f"    - 加密主密钥前几个字节: {self.client_key_exchange.encrypted_shared_secret[:8].hex()}...")
 
             # 解密主密钥
-            self.master_secret = rsa_decrypt(self.private_key, self.client_key_exchange.encrypted_shared_secret)
+            self.master_secret = self.crypto_module['rsa_decrypt'](self.private_key, self.client_key_exchange.encrypted_shared_secret)
             if not self.master_secret or len(self.master_secret) != 48:
                 print("[!] 主密钥解密失败")
                 return False
@@ -208,20 +270,14 @@ class TLSServer:
             print(f"    - master_secret: {self.master_secret.hex()}")
 
             # 生成会话密钥
-            self.session_key = derive_key(
+            self.session_key = self.crypto_module['derive_key'](
                 self.master_secret,
                 b'KEY',
                 self.client_hello.random,
                 self.server_hello.random
             )
             print(f"    - 会话密钥 (session_key): {self.session_key.hex()}")
-            print(f"{client_hello_raw}")
-            print(f"{server_hello_raw}")
-            print(f"{hashlib.sha256(server_cert_raw).digest()}")
-            print(f"{hashlib.sha256(client_cert_raw).digest()}")
-            print(f"{cert_verify_raw}")
-            print(f"{client_key_exchange_raw}")
-
+            
             # 7. 发送 ServerFinished - 使用原始数据构造握手消息
             handshake_messages = (
                 client_hello_raw +
@@ -233,7 +289,7 @@ class TLSServer:
             )
             print(f"    - 握手消息摘要: {hashlib.sha256(handshake_messages).hexdigest()}")
             
-            message_mac = hmac(
+            message_mac = self.crypto_module['hmac'](
                 self.master_secret,
                 b'SERVER' + hashlib.sha256(handshake_messages).digest()
             )
@@ -256,7 +312,7 @@ class TLSServer:
             print("[*] 收到 ClientFinished")
             print(f"    - ClientFinished MAC: {client_finished.message_mac.hex()}")
 
-            expected_mac = hmac(
+            expected_mac = self.crypto_module['hmac'](
                 self.master_secret,
                 b'CLIENT' + hashlib.sha256(handshake_messages).digest()
             )
@@ -269,7 +325,8 @@ class TLSServer:
                 return False
 
             print("[*] 客户端握手验证成功")
-            print("[*] 握手完成，建立安全通道")
+            crypto_type = "国密" if self.use_gm else "传统"
+            print(f"[*] 握手完成，建立安全通道 ({crypto_type}算法)")
 
             self.handshake_complete = True
             return True
@@ -291,16 +348,17 @@ class TLSServer:
                     break
                 
                 app_data = ApplicationData.from_message(msg)
-                
+
                 # 解密应用数据
-                decrypted_data = aes_decrypt(self.session_key, app_data.encrypted_data)
+                decrypted_data = self.crypto_module['aes_decrypt'](self.session_key, app_data.encrypted_data)
                 
                 # 提取长度和实际数据
                 if len(decrypted_data) >= 2:
                     length = int.from_bytes(decrypted_data[:2], byteorder='big')
                     if len(decrypted_data) >= 2 + length:
                         actual_data = decrypted_data[2:2+length]
-                        print(f"[*] 收到解密后的应用数据: {actual_data.decode('utf-8', errors='ignore')}")
+                        crypto_type = "国密" if self.use_gm else "传统"
+                        print(f"[*] 收到解密后的应用数据 ({crypto_type}算法): {actual_data.decode('utf-8', errors='ignore')}")
                         
                         # 回复消息
                         response = f"服务器收到: {actual_data.decode('utf-8', errors='ignore')}".encode('utf-8')
@@ -308,11 +366,11 @@ class TLSServer:
                         response_data = response_length + response
                         
                         # 加密响应
-                        encrypted_response = aes_encrypt(self.session_key, response_data)
+                        encrypted_response = self.crypto_module['aes_encrypt'](self.session_key, response_data)
                         response_msg = ApplicationData(encrypted_response)
                         
                         self.send_message(response_msg.pack())
-                        print("[*] 发送加密响应")
+                        print(f"[*] 发送加密响应 ({crypto_type}算法)")
                     else:
                         print("[!] 应用数据格式错误")
                 else:
@@ -321,7 +379,6 @@ class TLSServer:
         except Exception as e:
             print(f"[!] 处理应用数据时出错: {e}")
 
-    
     def send_message(self, data):
         try:
             self.client_socket.sendall(data)
@@ -340,10 +397,20 @@ class TLSServer:
             print(f"[!] 接收消息时出错: {e}")
             return None
 
-if __name__ == "__main__":
-    port = 8443
-    if len(sys.argv) > 1:
-        port = int(sys.argv[1])
+def main():
+    parser = argparse.ArgumentParser(description='TLS服务器 - 支持国密算法')
+    parser.add_argument('--host', default='localhost', help='服务器地址 (默认: localhost)')
+    parser.add_argument('--port', type=int, default=8443, help='服务器端口 (默认: 8443)')
+    parser.add_argument('--crypto', choices=['standard', 'gm'], default='standard', 
+                        help='加密算法类型: standard(传统算法) 或 gm(国密算法) (默认: standard)')
     
-    server = TLSServer(port=port)
+    args = parser.parse_args()
+    
+    # 确定是否使用国密算法
+    use_gm = args.crypto == 'gm'
+    
+    server = TLSServer(args.host, args.port, use_gm)
     server.start()
+
+if __name__ == "__main__":
+    main()
